@@ -1,0 +1,687 @@
+import { useState, useRef, useCallback } from "react";
+
+const CURRENCIES = [
+  { code: "USD", symbol: "$", name: "US Dollar" },
+  { code: "GBP", symbol: "£", name: "British Pound" },
+  { code: "EUR", symbol: "€", name: "Euro" },
+  { code: "CAD", symbol: "C$", name: "Canadian Dollar" },
+  { code: "AUD", symbol: "A$", name: "Australian Dollar" },
+  { code: "INR", symbol: "₹", name: "Indian Rupee" },
+  { code: "SGD", symbol: "S$", name: "Singapore Dollar" },
+  { code: "BRL", symbol: "R$", name: "Brazilian Real" },
+  { code: "JPY", symbol: "¥", name: "Japanese Yen" },
+  { code: "MXN", symbol: "MX$", name: "Mexican Peso" },
+];
+
+const FX_RATES = { USD: 1, GBP: 0.79, EUR: 0.92, CAD: 1.36, AUD: 1.53, INR: 83.12, SGD: 1.34, BRL: 4.97, JPY: 149.5, MXN: 17.15 };
+
+const COST_POOLS = [
+  { id: "rd", name: "Research & Development", color: "bg-blue-100 text-blue-700", icon: "🔬" },
+  { id: "sales", name: "Sales & Marketing", color: "bg-purple-100 text-purple-700", icon: "📣" },
+  { id: "ga", name: "General & Administrative", color: "bg-amber-100 text-amber-700", icon: "🏢" },
+  { id: "ops", name: "Operations", color: "bg-green-100 text-green-700", icon: "⚙️" },
+  { id: "cogs", name: "Cost of Goods/Services", color: "bg-red-100 text-red-700", icon: "📦" },
+  { id: "exclude", name: "Exclude (Non-allocable)", color: "bg-gray-100 text-gray-500", icon: "🚫" },
+];
+
+const KEYWORDS = {
+  rd: ["software","engineer","develop","research","aws","azure","cloud","hosting","server","github","jira","figma","design","product","qa","testing","devops","infrastructure","api","database","saas","license","tech"],
+  sales: ["marketing","advertis","google ads","facebook","linkedin","hubspot","salesforce","crm","conference","event","trade show","content","seo","brand","campaign","lead","sponsor","pr ","media","social"],
+  ga: ["office","rent","lease","insurance","legal","accounting","audit","admin","hr ","recruit","payroll","benefit","travel","meal","subscription","phone","internet","utilities","cleaning","supplies","postage"],
+  ops: ["support","customer","service","operations","logistics","shipping","warehouse","fulfillment","quality","training","onboard"],
+  cogs: ["material","inventory","manufacture","production","supplier","vendor","wholesale","freight","customs","import"],
+};
+
+function classifyItem(desc) {
+  const d = desc.toLowerCase();
+  let best = "ga", bestScore = 0, confidence = 0.6;
+  for (const [pool, kws] of Object.entries(KEYWORDS)) {
+    let score = 0;
+    for (const kw of kws) { if (d.includes(kw)) score += kw.length; }
+    if (score > bestScore) { bestScore = score; best = pool; confidence = Math.min(0.65 + score * 0.04, 0.97); }
+  }
+  if (bestScore === 0) confidence = 0.45;
+  return { pool: best, confidence };
+}
+
+function fmt(n, decimals = 2) { return n.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }); }
+function fmtCur(n, sym) { return `${sym}${fmt(n)}`; }
+
+const SAMPLE_ITEMS = [
+  { desc: "AWS hosting — production servers", amount: 4200 },
+  { desc: "GitHub Enterprise license", amount: 780 },
+  { desc: "Google Ads — Q1 campaign", amount: 3500 },
+  { desc: "Office rent — London WeWork", amount: 6200 },
+  { desc: "Figma team subscription", amount: 450 },
+  { desc: "Legal fees — employment contracts", amount: 2800 },
+  { desc: "Engineering contractor — backend dev", amount: 8500 },
+  { desc: "HubSpot CRM subscription", amount: 890 },
+  { desc: "Travel — team offsite Berlin", amount: 3200 },
+  { desc: "Customer support tooling — Zendesk", amount: 620 },
+  { desc: "D&O Insurance premium", amount: 1900 },
+  { desc: "Recruiting fees — senior hire", amount: 4500 },
+];
+
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+const TP_METHODS = [
+  { id: "cost_plus", name: "Cost Plus", desc: "Base cost + fixed markup percentage. Most common for intercompany services." },
+  { id: "tnmm", name: "TNMM", desc: "Transactional Net Margin Method. Compares net profit margin to comparable third parties." },
+  { id: "cup", name: "CUP", desc: "Comparable Uncontrolled Price. Uses market price for identical/similar services." },
+];
+
+function StepIndicator({ steps, current }) {
+  return (
+    <div className="flex items-center gap-1 mb-8">
+      {steps.map((s, i) => (
+        <div key={i} className="flex items-center flex-1">
+          <div className={`flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold flex-shrink-0 ${
+            i < current ? "bg-indigo-600 text-white" : i === current ? "bg-indigo-600 text-white ring-4 ring-indigo-100" : "bg-gray-200 text-gray-400"
+          }`}>{i < current ? "✓" : i + 1}</div>
+          <div className={`ml-2 text-xs font-semibold hidden sm:block ${i <= current ? "text-gray-700" : "text-gray-300"}`}>{s}</div>
+          {i < steps.length - 1 && <div className={`flex-1 h-0.5 mx-2 ${i < current ? "bg-indigo-400" : "bg-gray-200"}`} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Card({ children, className = "" }) {
+  return <div className={`bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-4 ${className}`}>{children}</div>;
+}
+
+function Label({ children }) { return <label className="block text-sm font-semibold text-gray-700 mb-1.5">{children}</label>; }
+
+function Input({ ...props }) {
+  return <input {...props} className={`w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50 ${props.className || ""}`} />;
+}
+
+function Select({ children, ...props }) {
+  return <select {...props} className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 bg-white">{children}</select>;
+}
+
+function Btn({ children, variant = "primary", disabled, onClick, className = "" }) {
+  const base = "font-bold py-3 px-6 rounded-xl transition-all text-sm";
+  const styles = {
+    primary: disabled ? "bg-gray-100 text-gray-300 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700 text-white",
+    secondary: "bg-white border border-gray-200 hover:bg-gray-50 text-gray-600",
+    ghost: "text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50",
+  };
+  return <button onClick={onClick} disabled={disabled} className={`${base} ${styles[variant]} ${className}`}>{children}</button>;
+}
+
+export default function InvoiceGenerator() {
+  const [step, setStep] = useState(0);
+  const [sender, setSender] = useState({ name: "", country: "", currency: "USD", taxId: "" });
+  const [receiver, setReceiver] = useState({ name: "", country: "", currency: "GBP", taxId: "" });
+  const [method, setMethod] = useState("cost_plus");
+  const [markup, setMarkup] = useState("10");
+  const [period, setPeriod] = useState({ month: new Date().getMonth() === 0 ? 11 : new Date().getMonth() - 1, year: new Date().getFullYear() });
+  const [items, setItems] = useState([]);
+  const [fxRate, setFxRate] = useState("");
+  const [fxAuto, setFxAuto] = useState(true);
+  const [invNum, setInvNum] = useState("NX-2026-001");
+  const [payTerms, setPayTerms] = useState("30");
+  const [activeTab, setActiveTab] = useState("invoice");
+  const topRef = useRef(null);
+
+  const scrollUp = () => topRef.current?.scrollIntoView({ behavior: "smooth" });
+  const STEPS = ["Entities", "Costs", "Classify", "Calculate", "Output"];
+
+  const srcCur = CURRENCIES.find(c => c.code === sender.currency) || CURRENCIES[0];
+  const dstCur = CURRENCIES.find(c => c.code === receiver.currency) || CURRENCIES[1];
+
+  const autoFx = () => {
+    const from = FX_RATES[sender.currency] || 1;
+    const to = FX_RATES[receiver.currency] || 1;
+    return (to / from).toFixed(6);
+  };
+
+  const effectiveFx = fxAuto ? parseFloat(autoFx()) : parseFloat(fxRate) || 1;
+
+  const allocableItems = items.filter(i => i.pool !== "exclude");
+  const totalBase = allocableItems.reduce((s, i) => s + i.amount, 0);
+  const markupAmt = totalBase * (parseFloat(markup) / 100);
+  const totalSrc = totalBase + markupAmt;
+  const totalDst = totalSrc * effectiveFx;
+
+  const poolTotals = COST_POOLS.filter(p => p.id !== "exclude").map(p => {
+    const poolItems = allocableItems.filter(i => i.pool === p.id);
+    return { ...p, total: poolItems.reduce((s, i) => s + i.amount, 0), count: poolItems.length };
+  }).filter(p => p.total > 0);
+
+  const loadSample = () => {
+    setItems(SAMPLE_ITEMS.map((it, i) => {
+      const c = classifyItem(it.desc);
+      return { id: i, desc: it.desc, amount: it.amount, pool: c.pool, confidence: c.confidence, edited: false };
+    }));
+  };
+
+  const addItem = () => {
+    setItems([...items, { id: Date.now(), desc: "", amount: 0, pool: "ga", confidence: 1, edited: true }]);
+  };
+
+  const updateItem = (id, field, val) => {
+    setItems(items.map(i => {
+      if (i.id !== id) return i;
+      const updated = { ...i, [field]: val };
+      if (field === "desc" && !i.edited) {
+        const c = classifyItem(val);
+        updated.pool = c.pool;
+        updated.confidence = c.confidence;
+      }
+      if (field === "pool") { updated.edited = true; updated.confidence = 1.0; }
+      return updated;
+    }));
+  };
+
+  const removeItem = (id) => setItems(items.filter(i => i.id !== id));
+
+  const classifyAll = () => {
+    setItems(items.map(i => {
+      if (i.edited && i.confidence === 1.0) return i;
+      const c = classifyItem(i.desc);
+      return { ...i, pool: c.pool, confidence: c.confidence };
+    }));
+  };
+
+  const canProceed = () => {
+    if (step === 0) return sender.name && receiver.name && sender.currency && receiver.currency;
+    if (step === 1) return items.length > 0 && items.every(i => i.desc && i.amount > 0);
+    return true;
+  };
+
+  const goNext = () => {
+    if (step === 1) classifyAll();
+    if (step < STEPS.length - 1) { setStep(step + 1); scrollUp(); }
+  };
+  const goBack = () => { if (step > 0) { setStep(step - 1); scrollUp(); } };
+
+  // ===== STEP 0: ENTITIES =====
+  const renderEntities = () => (
+    <>
+      <Card>
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-lg">🏢</span>
+          <h3 className="font-bold text-gray-900">Sending Entity (invoicing party)</h3>
+        </div>
+        <p className="text-xs text-gray-400 mb-4">The entity providing the services or bearing the costs being recharged.</p>
+        <div className="grid grid-cols-2 gap-4">
+          <div><Label>Entity Name</Label><Input placeholder="e.g. Acme Inc." value={sender.name} onChange={e => setSender({...sender, name: e.target.value})} /></div>
+          <div><Label>Country</Label><Input placeholder="e.g. United States" value={sender.country} onChange={e => setSender({...sender, country: e.target.value})} /></div>
+          <div><Label>Currency</Label>
+            <Select value={sender.currency} onChange={e => setSender({...sender, currency: e.target.value})}>
+              {CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.code} — {c.name}</option>)}
+            </Select>
+          </div>
+          <div><Label>Tax ID (optional)</Label><Input placeholder="e.g. EIN, VAT number" value={sender.taxId} onChange={e => setSender({...sender, taxId: e.target.value})} /></div>
+        </div>
+      </Card>
+      <Card>
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-lg">🌍</span>
+          <h3 className="font-bold text-gray-900">Receiving Entity (being invoiced)</h3>
+        </div>
+        <p className="text-xs text-gray-400 mb-4">The entity receiving the services or being allocated the costs.</p>
+        <div className="grid grid-cols-2 gap-4">
+          <div><Label>Entity Name</Label><Input placeholder="e.g. Acme UK Ltd" value={receiver.name} onChange={e => setReceiver({...receiver, name: e.target.value})} /></div>
+          <div><Label>Country</Label><Input placeholder="e.g. United Kingdom" value={receiver.country} onChange={e => setReceiver({...receiver, country: e.target.value})} /></div>
+          <div><Label>Currency</Label>
+            <Select value={receiver.currency} onChange={e => setReceiver({...receiver, currency: e.target.value})}>
+              {CURRENCIES.map(c => <option key={c.code} value={c.code}>{c.code} — {c.name}</option>)}
+            </Select>
+          </div>
+          <div><Label>Tax ID (optional)</Label><Input placeholder="e.g. EIN, VAT number" value={receiver.taxId} onChange={e => setReceiver({...receiver, taxId: e.target.value})} /></div>
+        </div>
+      </Card>
+      <Card>
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-lg">⚙️</span>
+          <h3 className="font-bold text-gray-900">Transfer Pricing Method</h3>
+        </div>
+        <div className="space-y-2 mb-4">
+          {TP_METHODS.map(m => (
+            <button key={m.id} onClick={() => setMethod(m.id)}
+              className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-all ${method === m.id ? "border-indigo-500 bg-indigo-50" : "border-gray-100 hover:border-gray-200"}`}>
+              <div className="font-semibold text-sm text-gray-800">{m.name}</div>
+              <div className="text-xs text-gray-500">{m.desc}</div>
+            </button>
+          ))}
+        </div>
+        {method === "cost_plus" && (
+          <div className="flex items-center gap-3 bg-gray-50 rounded-xl p-4">
+            <Label>Markup Percentage</Label>
+            <div className="flex items-center gap-2">
+              <Input type="number" value={markup} onChange={e => setMarkup(e.target.value)} className="w-24 text-center" />
+              <span className="text-gray-500 font-bold">%</span>
+            </div>
+          </div>
+        )}
+      </Card>
+      <Card>
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-lg">📅</span>
+          <h3 className="font-bold text-gray-900">Invoice Period</h3>
+        </div>
+        <div className="flex gap-4">
+          <div className="flex-1"><Label>Month</Label>
+            <Select value={period.month} onChange={e => setPeriod({...period, month: parseInt(e.target.value)})}>
+              {MONTHS.map((m, i) => <option key={i} value={i}>{m}</option>)}
+            </Select>
+          </div>
+          <div className="w-32"><Label>Year</Label>
+            <Select value={period.year} onChange={e => setPeriod({...period, year: parseInt(e.target.value)})}>
+              {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
+            </Select>
+          </div>
+        </div>
+      </Card>
+    </>
+  );
+
+  // ===== STEP 1: COSTS =====
+  const renderCosts = () => (
+    <>
+      <Card>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="font-bold text-gray-900">Cost Line Items</h3>
+            <p className="text-xs text-gray-400 mt-1">Enter costs incurred by <strong>{sender.name || "Sender"}</strong> to be recharged to <strong>{receiver.name || "Receiver"}</strong>.</p>
+          </div>
+          <div className="flex gap-2">
+            <Btn variant="ghost" onClick={loadSample} className="text-xs py-2 px-3">Load Sample Data</Btn>
+          </div>
+        </div>
+        <div className="bg-gray-50 rounded-xl p-3 mb-4 text-xs text-gray-500">
+          <strong>Tip:</strong> In production, you'd upload a CSV export from your GL. This prototype uses manual entry to demonstrate the classification engine.
+        </div>
+        <div className="space-y-2 mb-4">
+          {items.length === 0 && (
+            <div className="text-center py-8 text-gray-300">
+              <div className="text-3xl mb-2">📋</div>
+              <div className="text-sm">No items yet. Add costs or load sample data.</div>
+            </div>
+          )}
+          {items.map((item, idx) => (
+            <div key={item.id} className="flex items-center gap-2 bg-gray-50 rounded-xl p-3">
+              <span className="text-xs text-gray-300 w-5 flex-shrink-0">{idx + 1}</span>
+              <input placeholder="Description (e.g. AWS hosting)" value={item.desc}
+                onChange={e => updateItem(item.id, "desc", e.target.value)}
+                className="flex-1 bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400" />
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-gray-400">{srcCur.symbol}</span>
+                <input type="number" placeholder="0.00" value={item.amount || ""}
+                  onChange={e => updateItem(item.id, "amount", parseFloat(e.target.value) || 0)}
+                  className="w-28 bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm text-right focus:outline-none focus:border-indigo-400" />
+              </div>
+              <button onClick={() => removeItem(item.id)} className="text-gray-300 hover:text-red-400 text-lg px-1">×</button>
+            </div>
+          ))}
+        </div>
+        <button onClick={addItem} className="w-full border-2 border-dashed border-gray-200 hover:border-indigo-300 rounded-xl py-3 text-sm text-gray-400 hover:text-indigo-500 transition-colors font-semibold">+ Add Line Item</button>
+      </Card>
+      {items.length > 0 && (
+        <Card className="bg-gray-50 border-gray-200">
+          <div className="flex justify-between items-center">
+            <span className="text-sm font-semibold text-gray-600">Total ({items.length} items)</span>
+            <span className="text-xl font-bold text-gray-900">{fmtCur(items.reduce((s,i) => s + i.amount, 0), srcCur.symbol)}</span>
+          </div>
+        </Card>
+      )}
+    </>
+  );
+
+  // ===== STEP 2: CLASSIFY =====
+  const renderClassify = () => {
+    const lowConf = items.filter(i => i.confidence < 0.7 && i.pool !== "exclude");
+    return (
+      <>
+        <Card>
+          <h3 className="font-bold text-gray-900 mb-1">AI Cost Classification</h3>
+          <p className="text-xs text-gray-400 mb-4">Each line item has been classified into a cost pool. Items with low confidence are flagged — review and correct them.</p>
+          {lowConf.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 text-sm text-amber-700">
+              <strong>⚠ {lowConf.length} item{lowConf.length > 1 ? "s" : ""} need{lowConf.length === 1 ? "s" : ""} review</strong> — confidence below 70%. Check the highlighted rows.
+            </div>
+          )}
+          <div className="space-y-2">
+            {items.map((item) => {
+              const pool = COST_POOLS.find(p => p.id === item.pool);
+              const low = item.confidence < 0.7 && item.pool !== "exclude";
+              return (
+                <div key={item.id} className={`flex items-center gap-3 rounded-xl p-3 ${low ? "bg-amber-50 border border-amber-200" : "bg-gray-50"}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-800 truncate">{item.desc}</div>
+                    <div className="text-xs text-gray-400">{fmtCur(item.amount, srcCur.symbol)}</div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <div className={`text-xs font-bold px-2 py-1 rounded-full ${
+                      item.confidence >= 0.85 ? "bg-green-100 text-green-600" : item.confidence >= 0.7 ? "bg-blue-100 text-blue-600" : "bg-amber-100 text-amber-600"
+                    }`}>{Math.round(item.confidence * 100)}%</div>
+                    <select value={item.pool} onChange={e => updateItem(item.id, "pool", e.target.value)}
+                      className={`text-xs font-semibold rounded-lg px-3 py-2 border-0 ${pool?.color || ""}`}>
+                      {COST_POOLS.map(p => <option key={p.id} value={p.id}>{p.icon} {p.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+        <Card>
+          <h3 className="font-bold text-gray-900 mb-3">Cost Pool Summary</h3>
+          <div className="space-y-2">
+            {poolTotals.map(p => (
+              <div key={p.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+                <div className="flex items-center gap-2">
+                  <span>{p.icon}</span>
+                  <span className="text-sm font-medium text-gray-700">{p.name}</span>
+                  <span className="text-xs text-gray-400">({p.count} items)</span>
+                </div>
+                <span className="text-sm font-bold text-gray-900">{fmtCur(p.total, srcCur.symbol)}</span>
+              </div>
+            ))}
+            {items.filter(i => i.pool === "exclude").length > 0 && (
+              <div className="flex items-center justify-between py-2 text-gray-400">
+                <div className="flex items-center gap-2">
+                  <span>🚫</span>
+                  <span className="text-sm">Excluded</span>
+                </div>
+                <span className="text-sm line-through">{fmtCur(items.filter(i => i.pool === "exclude").reduce((s,i) => s + i.amount, 0), srcCur.symbol)}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between py-2 border-t-2 border-gray-200">
+              <span className="text-sm font-bold text-gray-900">Allocable Total</span>
+              <span className="text-lg font-black text-indigo-600">{fmtCur(totalBase, srcCur.symbol)}</span>
+            </div>
+          </div>
+        </Card>
+      </>
+    );
+  };
+
+  // ===== STEP 3: CALCULATE =====
+  const renderCalculate = () => (
+    <>
+      <Card>
+        <h3 className="font-bold text-gray-900 mb-1">Markup & FX Conversion</h3>
+        <p className="text-xs text-gray-400 mb-4">Review the calculation before generating your invoice.</p>
+        <div className="space-y-4">
+          <div className="bg-gray-50 rounded-xl p-4">
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-sm text-gray-600">Allocable cost base</span>
+              <span className="text-sm font-bold">{fmtCur(totalBase, srcCur.symbol)}</span>
+            </div>
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-sm text-gray-600">Markup ({markup}%)</span>
+              <span className="text-sm font-bold text-indigo-600">+ {fmtCur(markupAmt, srcCur.symbol)}</span>
+            </div>
+            <div className="flex justify-between items-center pt-2 border-t border-gray-200">
+              <span className="text-sm font-bold text-gray-900">Invoice total ({sender.currency})</span>
+              <span className="text-lg font-black text-gray-900">{fmtCur(totalSrc, srcCur.symbol)}</span>
+            </div>
+          </div>
+          {sender.currency !== receiver.currency && (
+            <div className="bg-indigo-50 rounded-xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-sm font-semibold text-gray-700">FX Conversion</span>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setFxAuto(true)} className={`text-xs px-3 py-1 rounded-full font-semibold ${fxAuto ? "bg-indigo-600 text-white" : "bg-white text-gray-500 border"}`}>Auto rate</button>
+                  <button onClick={() => { setFxAuto(false); setFxRate(autoFx()); }} className={`text-xs px-3 py-1 rounded-full font-semibold ${!fxAuto ? "bg-indigo-600 text-white" : "bg-white text-gray-500 border"}`}>Manual</button>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-sm text-gray-600">1 {sender.currency} =</span>
+                {fxAuto ? (
+                  <span className="text-sm font-bold">{autoFx()} {receiver.currency}</span>
+                ) : (
+                  <input type="number" step="0.0001" value={fxRate} onChange={e => setFxRate(e.target.value)} className="w-32 border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-right" />
+                )}
+                <span className="text-xs text-gray-400">{fxAuto ? "(indicative mid-market rate)" : ""}</span>
+              </div>
+              <div className="flex justify-between items-center pt-2 border-t border-indigo-200">
+                <span className="text-sm font-bold text-gray-900">Invoice total ({receiver.currency})</span>
+                <span className="text-lg font-black text-indigo-600">{fmtCur(totalDst, dstCur.symbol)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+      <Card>
+        <h3 className="font-bold text-gray-900 mb-3">Invoice Details</h3>
+        <div className="grid grid-cols-2 gap-4">
+          <div><Label>Invoice Number</Label><Input value={invNum} onChange={e => setInvNum(e.target.value)} /></div>
+          <div><Label>Payment Terms</Label>
+            <Select value={payTerms} onChange={e => setPayTerms(e.target.value)}>
+              <option value="15">Net 15</option>
+              <option value="30">Net 30</option>
+              <option value="45">Net 45</option>
+              <option value="60">Net 60</option>
+            </Select>
+          </div>
+        </div>
+      </Card>
+    </>
+  );
+
+  // ===== STEP 4: OUTPUT =====
+  const renderOutput = () => {
+    const invDate = new Date();
+    const dueDate = new Date(); dueDate.setDate(dueDate.getDate() + parseInt(payTerms));
+    const periodStr = `${MONTHS[period.month]} ${period.year}`;
+    const tabs = [
+      { id: "invoice", label: "📄 Invoice", icon: "" },
+      { id: "memo", label: "📋 Memo", icon: "" },
+      { id: "journal", label: "📊 Journal Entries", icon: "" },
+    ];
+
+    return (
+      <>
+        <div className="flex gap-1 mb-4 bg-gray-100 p-1 rounded-xl">
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)}
+              className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all ${activeTab === t.id ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "invoice" && (
+          <Card>
+            <div className="border-2 border-gray-200 rounded-xl p-6">
+              <div className="flex justify-between items-start mb-6 pb-4 border-b border-gray-100">
+                <div>
+                  <div className="text-xs font-bold tracking-widest text-indigo-600 mb-1">INTERCOMPANY INVOICE</div>
+                  <div className="text-2xl font-black text-gray-900">{invNum}</div>
+                </div>
+                <div className="text-right text-sm">
+                  <div className="text-gray-400">Date: <span className="text-gray-700 font-medium">{invDate.toLocaleDateString()}</span></div>
+                  <div className="text-gray-400">Due: <span className="text-gray-700 font-medium">{dueDate.toLocaleDateString()}</span></div>
+                  <div className="text-gray-400">Period: <span className="text-gray-700 font-medium">{periodStr}</span></div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-6 mb-6 pb-4 border-b border-gray-100">
+                <div>
+                  <div className="text-xs font-bold text-gray-400 mb-1">FROM</div>
+                  <div className="text-sm font-bold text-gray-900">{sender.name}</div>
+                  <div className="text-xs text-gray-500">{sender.country}</div>
+                  {sender.taxId && <div className="text-xs text-gray-400">Tax ID: {sender.taxId}</div>}
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-gray-400 mb-1">TO</div>
+                  <div className="text-sm font-bold text-gray-900">{receiver.name}</div>
+                  <div className="text-xs text-gray-500">{receiver.country}</div>
+                  {receiver.taxId && <div className="text-xs text-gray-400">Tax ID: {receiver.taxId}</div>}
+                </div>
+              </div>
+              <div className="mb-4">
+                <div className="text-xs font-bold text-gray-400 mb-2">DESCRIPTION: Intercompany service recharge for {periodStr}</div>
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-xs text-gray-400 border-b border-gray-100">
+                    <th className="py-2 font-semibold">Cost Pool</th>
+                    <th className="py-2 font-semibold text-right">Amount ({sender.currency})</th>
+                  </tr></thead>
+                  <tbody>
+                    {poolTotals.map(p => (
+                      <tr key={p.id} className="border-b border-gray-50">
+                        <td className="py-2 text-gray-700">{p.icon} {p.name}</td>
+                        <td className="py-2 text-right font-medium">{fmtCur(p.total, srcCur.symbol)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                <div className="flex justify-between text-sm"><span className="text-gray-500">Subtotal (cost base)</span><span>{fmtCur(totalBase, srcCur.symbol)}</span></div>
+                <div className="flex justify-between text-sm"><span className="text-gray-500">Markup ({markup}%)</span><span className="text-indigo-600">{fmtCur(markupAmt, srcCur.symbol)}</span></div>
+                <div className="flex justify-between text-sm font-bold pt-2 border-t"><span>Total ({sender.currency})</span><span>{fmtCur(totalSrc, srcCur.symbol)}</span></div>
+                {sender.currency !== receiver.currency && (
+                  <>
+                    <div className="flex justify-between text-xs text-gray-400"><span>FX: 1 {sender.currency} = {effectiveFx.toFixed(4)} {receiver.currency}</span></div>
+                    <div className="flex justify-between text-sm font-black text-indigo-600"><span>Amount Due ({receiver.currency})</span><span>{fmtCur(totalDst, dstCur.symbol)}</span></div>
+                  </>
+                )}
+              </div>
+              <div className="text-center mt-4 pt-3 border-t border-gray-100">
+                <div className="text-xs text-gray-300">Payment Terms: Net {payTerms} days</div>
+                <div className="text-xs text-gray-300 mt-1">Generated by Nexus · nexus.finance</div>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {activeTab === "memo" && (
+          <Card>
+            <div className="border-2 border-gray-200 rounded-xl p-6">
+              <div className="text-xs font-bold tracking-widest text-indigo-600 mb-1">INTERCOMPANY COST BREAKDOWN MEMO</div>
+              <div className="text-lg font-black text-gray-900 mb-1">{sender.name} → {receiver.name}</div>
+              <div className="text-sm text-gray-500 mb-6">Period: {periodStr} | Invoice: {invNum}</div>
+
+              <div className="mb-6">
+                <div className="text-sm font-bold text-gray-800 mb-2">1. Transaction Description</div>
+                <p className="text-sm text-gray-600 leading-relaxed">
+                  This memo documents the intercompany service recharge from {sender.name} ({sender.country}) to {receiver.name} ({receiver.country}) for the period of {periodStr}. The recharge covers shared operational costs incurred by {sender.name} on behalf of {receiver.name}.
+                </p>
+              </div>
+              <div className="mb-6">
+                <div className="text-sm font-bold text-gray-800 mb-2">2. Transfer Pricing Method</div>
+                <p className="text-sm text-gray-600 leading-relaxed">
+                  The {method === "cost_plus" ? "Cost Plus" : method === "tnmm" ? "Transactional Net Margin" : "Comparable Uncontrolled Price"} method has been applied.
+                  {method === "cost_plus" && ` A markup of ${markup}% has been applied to the allocable cost base. This markup is intended to reflect the arm's length compensation for the services provided, consistent with the intercompany agreement between the parties.`}
+                </p>
+              </div>
+              <div className="mb-6">
+                <div className="text-sm font-bold text-gray-800 mb-2">3. Cost Pool Breakdown</div>
+                {poolTotals.map(p => (
+                  <div key={p.id} className="flex justify-between py-1.5 border-b border-gray-50 text-sm">
+                    <span className="text-gray-600">{p.icon} {p.name} ({p.count} line items)</span>
+                    <span className="font-medium">{fmtCur(p.total, srcCur.symbol)}</span>
+                  </div>
+                ))}
+                <div className="flex justify-between py-2 border-t border-gray-200 text-sm font-bold mt-1">
+                  <span>Total allocable cost base</span><span>{fmtCur(totalBase, srcCur.symbol)}</span>
+                </div>
+              </div>
+              <div className="mb-6">
+                <div className="text-sm font-bold text-gray-800 mb-2">4. Calculation</div>
+                <div className="bg-gray-50 rounded-lg p-3 text-sm space-y-1 font-mono">
+                  <div>Cost base: {srcCur.symbol}{fmt(totalBase)}</div>
+                  <div>Markup ({markup}%): {srcCur.symbol}{fmt(markupAmt)}</div>
+                  <div className="font-bold">Total ({sender.currency}): {srcCur.symbol}{fmt(totalSrc)}</div>
+                  {sender.currency !== receiver.currency && (
+                    <>
+                      <div className="pt-1">FX rate: 1 {sender.currency} = {effectiveFx.toFixed(4)} {receiver.currency}</div>
+                      <div className="font-bold">Total ({receiver.currency}): {dstCur.symbol}{fmt(totalDst)}</div>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="mb-4">
+                <div className="text-sm font-bold text-gray-800 mb-2">5. Supporting Documentation</div>
+                <p className="text-sm text-gray-600">
+                  Detailed line-item records, GL export, and the corresponding intercompany invoice ({invNum}) are maintained as supporting documentation for this recharge. Classification of expenses into cost pools was performed using AI-assisted categorization with human review of low-confidence items.
+                </p>
+              </div>
+              <div className="text-xs text-gray-300 mt-6 pt-3 border-t">
+                This memo is prepared for internal documentation purposes and does not constitute tax advice. Consult your tax advisor for guidance on transfer pricing compliance. Generated by Nexus · nexus.finance
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {activeTab === "journal" && (
+          <Card>
+            <h3 className="font-bold text-gray-900 mb-1">Journal Entries</h3>
+            <p className="text-xs text-gray-400 mb-4">Both sides of the intercompany transaction, ready for ERP import.</p>
+
+            <div className="mb-4">
+              <div className="text-xs font-bold tracking-wider text-indigo-600 mb-2">📕 {sender.name} (Books of sender)</div>
+              <div className="bg-gray-50 rounded-xl overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-xs text-gray-400 bg-gray-100"><th className="p-2 text-left">Account</th><th className="p-2 text-right">Debit ({sender.currency})</th><th className="p-2 text-right">Credit ({sender.currency})</th></tr></thead>
+                  <tbody>
+                    <tr className="border-b border-gray-100"><td className="p-2 text-gray-700">Intercompany Receivable — {receiver.name}</td><td className="p-2 text-right font-medium">{fmt(totalSrc)}</td><td className="p-2"></td></tr>
+                    {poolTotals.map(p => (
+                      <tr key={p.id} className="border-b border-gray-100"><td className="p-2 text-gray-700 pl-4">↳ {p.name} Recharge Income</td><td className="p-2"></td><td className="p-2 text-right font-medium">{fmt(p.total * (1 + parseFloat(markup)/100))}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="mb-4">
+              <div className="text-xs font-bold tracking-wider text-green-600 mb-2">📗 {receiver.name} (Books of receiver)</div>
+              <div className="bg-gray-50 rounded-xl overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-xs text-gray-400 bg-gray-100"><th className="p-2 text-left">Account</th><th className="p-2 text-right">Debit ({receiver.currency})</th><th className="p-2 text-right">Credit ({receiver.currency})</th></tr></thead>
+                  <tbody>
+                    {poolTotals.map(p => {
+                      const v = p.total * (1 + parseFloat(markup)/100) * (sender.currency !== receiver.currency ? effectiveFx : 1);
+                      return <tr key={p.id} className="border-b border-gray-100"><td className="p-2 text-gray-700">↳ {p.name} Expense — IC</td><td className="p-2 text-right font-medium">{fmt(v)}</td><td className="p-2"></td></tr>;
+                    })}
+                    <tr><td className="p-2 text-gray-700">Intercompany Payable — {sender.name}</td><td className="p-2"></td><td className="p-2 text-right font-medium">{fmt(sender.currency !== receiver.currency ? totalDst : totalSrc)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <Btn variant="secondary" className="flex-1 text-xs py-2">⬇ Download CSV (Xero format)</Btn>
+              <Btn variant="secondary" className="flex-1 text-xs py-2">⬇ Download CSV (QBO format)</Btn>
+              <Btn variant="secondary" className="flex-1 text-xs py-2">⬇ Download CSV (Generic)</Btn>
+            </div>
+          </Card>
+        )}
+
+        <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-5 text-center">
+          <p className="text-sm font-semibold text-gray-800 mb-1">This is a prototype of the Nexus Invoice Generator.</p>
+          <p className="text-xs text-gray-500 mb-3">In production: real PDF downloads, saved history, ERP integrations, and automated monthly runs.</p>
+          <Btn variant="ghost" onClick={() => { setStep(0); scrollUp(); }} className="text-xs">← Start Over</Btn>
+        </div>
+      </>
+    );
+  };
+
+  // ===== MAIN LAYOUT =====
+  return (
+    <div ref={topRef} className="min-h-screen bg-gray-50 p-4">
+      <div className="max-w-2xl mx-auto">
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-600 text-xs font-bold tracking-wider px-4 py-2 rounded-full mb-3">NEXUS · INVOICE GENERATOR</div>
+          <h1 className="text-xl font-black text-gray-900">Intercompany Invoice Generator</h1>
+          <p className="text-sm text-gray-400 mt-1">Compliant invoices + cost breakdown memos + journal entries in minutes.</p>
+        </div>
+        <StepIndicator steps={STEPS} current={step} />
+        {step === 0 && renderEntities()}
+        {step === 1 && renderCosts()}
+        {step === 2 && renderClassify()}
+        {step === 3 && renderCalculate()}
+        {step === 4 && renderOutput()}
+        {step < 4 && (
+          <div className="flex gap-3 mt-4">
+            {step > 0 && <Btn variant="secondary" onClick={goBack}>← Back</Btn>}
+            <Btn variant="primary" onClick={goNext} disabled={!canProceed()} className="flex-1">{step === 3 ? "Generate Outputs →" : "Continue →"}</Btn>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
