@@ -275,11 +275,14 @@ function GapItem({ icon, title, desc, severity }) {
   );
 }
 
+const API_URL = "https://xmrd6fdrpa.execute-api.us-east-1.amazonaws.com/send-report";
+
 export default function TPRiskAssessment() {
   const [screen, setScreen] = useState("intro");
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState({});
   const [email, setEmail] = useState("");
+  const [sendStatus, setSendStatus] = useState("idle"); // idle | sending | sent | error
   const topRef = useRef(null);
 
   const scrollUp = () => topRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -312,31 +315,36 @@ export default function TPRiskAssessment() {
   };
 
   const calcScore = () => {
-    let s = 0;
+    let raw = 0;
+    // Base scores from single-select questions
     QUESTIONS.forEach(q => {
       const a = answers[q.id];
       if (!a) return;
       if (q.type === "single" && q.options) {
         const opt = q.options.find(o => o.value === a);
-        if (opt) s += opt.score || 0;
+        if (opt) raw += opt.score || 0;
       }
     });
-    // Jurisdiction risk
+    // Jurisdiction risk: each high-scrutiny country adds points
     const countries = answers.countries || [];
     const highScrutiny = countries.filter(c => HIGH_SCRUTINY.includes(c));
-    s += highScrutiny.length * 3;
-    // Transaction type complexity
+    raw += highScrutiny.length * 3;
+    // Transaction type complexity bonuses
     const txnTypes = answers.txn_types || [];
-    if (txnTypes.includes("ip")) s += 8;
-    if (txnTypes.includes("loans")) s += 5;
-    if (txnTypes.length >= 4) s += 5;
-    // Upcoming events amplifier
+    if (txnTypes.includes("ip")) raw += 8;
+    if (txnTypes.includes("loans")) raw += 5;
+    if (txnTypes.length >= 4) raw += 5;
+    // Upcoming events amplify existing risk
     const upcoming = answers.upcoming || [];
-    if (upcoming.includes("fundraise") || upcoming.includes("ma")) {
-      if (s > 30) s += 10; // amplify existing risk
-    }
-    if (upcoming.includes("new_entities")) s += 3;
-    return Math.min(Math.round(s), 100);
+    if ((upcoming.includes("fundraise") || upcoming.includes("ma")) && raw > 30) raw += 10;
+    if (upcoming.includes("new_entities")) raw += 3;
+
+    // Normalize: max realistic raw ≈ 200 (worst answers + 3 high-scrutiny + IP/loans + amplifier)
+    // Scale to 0-100 with slight curve to spread the middle range
+    const normalized = (raw / 200) * 100;
+    // Apply a sqrt curve so moderate scores don't bunch up at the top
+    const curved = Math.pow(normalized / 100, 0.85) * 100;
+    return Math.min(Math.round(curved), 100);
   };
 
   const getGaps = () => {
@@ -384,6 +392,35 @@ export default function TPRiskAssessment() {
       if (req.length > 0) actions.push({ time: "Within 90 days", action: `Prepare Local File documentation for ${req.map(c => JURISDICTIONS.find(j=>j.code===c)?.name).join(", ")}`, detail: "Check local thresholds — you may already be required to file. Start with the highest-risk jurisdiction." });
     }
     return actions;
+  };
+
+  const sendReport = async () => {
+    if (!email || !email.includes("@")) return;
+    setSendStatus("sending");
+    try {
+      const score = calcScore();
+      const gaps = getGaps();
+      const actions = getActions();
+      const a = answers;
+      const txnValueMap = { "<100k": "<$100K", "100k-500k": "$100K–$500K", "500k-2m": "$500K–$2M", ">2m": "$2M+" };
+      const summary = {
+        entities: a.entities || "—",
+        countriesCount: (a.countries || []).length,
+        txnValue: txnValueMap[a.txn_value] || "—",
+        txnTypesCount: (a.txn_types || []).length,
+      };
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, score, summary, gaps, actions }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      setSendStatus("sent");
+    } catch (err) {
+      console.error(err);
+      setSendStatus("error");
+      setTimeout(() => setSendStatus("idle"), 4000);
+    }
   };
 
   // INTRO SCREEN
@@ -441,10 +478,80 @@ export default function TPRiskAssessment() {
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6">
             <h2 className="font-bold text-gray-900 mb-1 text-lg">Gaps Identified</h2>
             <p className="text-gray-400 text-xs mb-4">{gaps.length} issue{gaps.length !== 1 ? "s" : ""} found, ranked by severity</p>
-            {gaps.map((g, i) => <GapItem key={i} {...g} />)}
+            {gaps.slice(0, 2).map((g, i) => <GapItem key={i} {...g} />)}
             {gaps.length === 0 && <p className="text-gray-500 text-sm">No major gaps identified. Keep up the good work.</p>}
+            {gaps.length > 2 && sendStatus !== "sent" && (
+              <div className="relative mt-2">
+                <div className="select-none" style={{ filter: "blur(5px)", pointerEvents: "none" }}>
+                  {gaps.slice(2).map((g, i) => <GapItem key={i + 2} {...g} />)}
+                </div>
+                <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded-xl">
+                  <div className="text-center px-6 py-5 max-w-sm">
+                    <div className="text-2xl mb-2">🔒</div>
+                    <p className="font-semibold text-gray-800 text-sm mb-1">+{gaps.length - 2} more issue{gaps.length - 2 !== 1 ? "s" : ""} identified</p>
+                    <p className="text-gray-500 text-xs mb-3">Enter your email to unlock the full report with all gaps and your personalized action plan.</p>
+                    <div className="flex gap-2">
+                      <input type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400" disabled={sendStatus === "sending"} />
+                      <button onClick={sendReport} disabled={sendStatus === "sending" || !email.includes("@")}
+                        className={`font-semibold py-2 px-4 rounded-lg transition-colors text-sm whitespace-nowrap ${
+                          sendStatus === "sending" ? "bg-gray-400 text-white cursor-wait" :
+                          sendStatus === "error" ? "bg-red-600 text-white" :
+                          !email.includes("@") ? "bg-gray-300 text-gray-500 cursor-not-allowed" :
+                          "bg-indigo-600 hover:bg-indigo-700 text-white"
+                        }`}>
+                        {sendStatus === "sending" ? "..." : sendStatus === "error" ? "Retry" : "Unlock"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {gaps.length > 2 && sendStatus === "sent" && gaps.slice(2).map((g, i) => <GapItem key={i + 2} {...g} />)}
           </div>
-          {actions.length > 0 && (
+          {actions.length > 0 && sendStatus !== "sent" && (
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6">
+              <h2 className="font-bold text-gray-900 mb-1 text-lg">Recommended Action Plan</h2>
+              <p className="text-gray-400 text-xs mb-4">Prioritized by urgency</p>
+              {actions.slice(0, 1).map((ac, i) => (
+                <div key={i} className="flex items-start gap-3 mb-4">
+                  <div className="flex-shrink-0 w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xs font-bold">{i + 1}</div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="font-semibold text-gray-800 text-sm">{ac.action}</span>
+                    </div>
+                    <span className="text-xs font-semibold text-indigo-500 block mb-1">⏱ {ac.time}</span>
+                    <p className="text-gray-500 text-xs">{ac.detail}</p>
+                  </div>
+                </div>
+              ))}
+              {actions.length > 1 && (
+                <div className="relative mt-2">
+                  <div className="select-none" style={{ filter: "blur(5px)", pointerEvents: "none" }}>
+                    {actions.slice(1).map((ac, i) => (
+                      <div key={i + 1} className="flex items-start gap-3 mb-4 last:mb-0">
+                        <div className="flex-shrink-0 w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xs font-bold">{i + 2}</div>
+                        <div>
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <span className="font-semibold text-gray-800 text-sm">{ac.action}</span>
+                          </div>
+                          <span className="text-xs font-semibold text-indigo-500 block mb-1">⏱ {ac.time}</span>
+                          <p className="text-gray-500 text-xs">{ac.detail}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded-xl">
+                    <div className="text-center px-6">
+                      <div className="text-2xl mb-2">🔒</div>
+                      <p className="font-semibold text-gray-800 text-sm">+{actions.length - 1} more action{actions.length - 1 !== 1 ? "s" : ""}</p>
+                      <p className="text-gray-500 text-xs mt-1">Submit your email above to see your full action plan.</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {actions.length > 0 && sendStatus === "sent" && (
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6">
               <h2 className="font-bold text-gray-900 mb-1 text-lg">Recommended Action Plan</h2>
               <p className="text-gray-400 text-xs mb-4">Prioritized by urgency</p>
@@ -462,19 +569,59 @@ export default function TPRiskAssessment() {
               ))}
             </div>
           )}
-          <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 mb-6 text-center">
-            <h3 className="font-bold text-gray-900 mb-2">Want to fix gap #1 right now?</h3>
-            <p className="text-gray-600 text-sm mb-4">Our free Intercompany Invoice Generator creates compliant invoices + supporting documentation in 60 seconds.</p>
-            <button className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl transition-colors text-sm">Try the Invoice Generator →</button>
-          </div>
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6">
-            <h3 className="font-semibold text-gray-900 mb-2 text-sm">Get this report as a PDF</h3>
-            <p className="text-gray-500 text-xs mb-3">We'll email you a formatted version you can share with your team or advisors.</p>
-            <div className="flex gap-2">
-              <input type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400" />
-              <button className="bg-gray-900 hover:bg-gray-800 text-white font-semibold py-2 px-5 rounded-lg transition-colors text-sm whitespace-nowrap">Send Report</button>
+          {(() => {
+            const hasDocGap = a.tp_policy === "none" || a.tp_policy === "unsure" || a.tp_policy === "outdated";
+            const hasCalcGap = a.calc_method === "adhoc" || a.calc_method === "none" || a.calc_method === "spreadsheet";
+            const hasFreqGap = a.frequency !== "monthly";
+            const hasAgreementGap = a.agreements === "none" || a.agreements === "unsure" || a.agreements === "some";
+            const showInvoiceCTA = hasCalcGap || hasFreqGap || hasDocGap;
+            const showAgreementCTA = hasAgreementGap && !showInvoiceCTA;
+
+            if (score <= 25) return (
+              <div className="bg-green-50 border border-green-100 rounded-2xl p-6 mb-6 text-center">
+                <h3 className="font-bold text-gray-900 mb-2">You're in good shape.</h3>
+                <p className="text-gray-600 text-sm mb-4">Stay ahead by automating your monthly intercompany invoicing — consistent documentation is your best defense over time.</p>
+                <button className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-xl transition-colors text-sm">Automate Your Monthly Close →</button>
+              </div>
+            );
+
+            if (showInvoiceCTA) return (
+              <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 mb-6 text-center">
+                <h3 className="font-bold text-gray-900 mb-2">
+                  {hasCalcGap ? "Replace your spreadsheet with a proper invoicing process" : hasFreqGap ? "Switch to monthly invoicing — it's the fastest way to reduce your score" : "Build your documentation trail automatically"}
+                </h3>
+                <p className="text-gray-600 text-sm mb-4">
+                  {hasCalcGap
+                    ? "Our free Invoice Generator calculates your intercompany recharges, applies your markup and FX conversion, and produces a compliant invoice + cost breakdown memo."
+                    : hasFreqGap
+                    ? "Moving from quarterly or ad hoc to monthly processing creates a clean audit trail. Our Invoice Generator makes the monthly process take minutes, not hours."
+                    : "Every invoice you generate comes with a cost breakdown memo documenting your methodology — the same document Big 4 firms charge thousands to prepare."}
+                </p>
+                <button className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl transition-colors text-sm">Try the Invoice Generator — Free →</button>
+              </div>
+            );
+
+            if (showAgreementCTA) return (
+              <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 mb-6 text-center">
+                <h3 className="font-bold text-gray-900 mb-2">Start with intercompany agreements — your biggest gap</h3>
+                <p className="text-gray-600 text-sm mb-4">Signed agreements are the foundation of TP compliance. We're building templates you can customize in minutes. Leave your email and we'll notify you when they're ready.</p>
+                <div className="flex gap-2 max-w-md mx-auto">
+                  <input type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400" />
+                  <button className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-5 rounded-lg transition-colors text-sm whitespace-nowrap">Notify Me</button>
+                </div>
+              </div>
+            );
+
+            return null;
+          })()}
+          {sendStatus === "sent" && (
+            <div className="bg-green-50 border border-green-200 rounded-2xl p-6 mb-6">
+              <div className="flex items-center gap-2">
+                <span className="text-green-500 text-lg">✓</span>
+                <span className="text-green-700 text-sm font-medium">Full report unlocked and sent to your inbox!</span>
+              </div>
             </div>
-          </div>
+          )}
           <div className="text-center">
             <button onClick={() => { setScreen("intro"); setStep(0); setAnswers({}); scrollUp(); }} className="text-gray-400 hover:text-gray-600 text-sm underline">Start over</button>
           </div>
@@ -536,25 +683,36 @@ export default function TPRiskAssessment() {
             </div>
           )}
 
-          {q.type === "multi-jurisdiction" && (
-            <div className="grid grid-cols-2 gap-2 max-h-72 overflow-y-auto">
+          {q.type === "multi-jurisdiction" && (() => {
+            const maxMap = { "2": 2, "3-5": 5, "6-10": 10, "10+": 50 };
+            const maxCountries = maxMap[answers.entities] || 50;
+            const selected = answers.countries || [];
+            const atLimit = selected.length >= maxCountries;
+            return (
+            <div>
+              {maxCountries <= 10 && <p className="text-xs text-indigo-500 font-semibold mb-3">Select up to {maxCountries} countries (based on {answers.entities} entities)</p>}
+              <div className="grid grid-cols-2 gap-2 max-h-72 overflow-y-auto">
               {JURISDICTIONS.map(j => {
-                const sel = (answers.countries || []).includes(j.code);
+                const sel = selected.includes(j.code);
+                const disabled = !sel && atLimit;
                 return (
-                  <button key={j.code} onClick={() => {
+                  <button key={j.code} disabled={disabled} onClick={() => {
+                    if (disabled) return;
                     const cur = answers.countries || [];
                     setAnswer("countries", sel ? cur.filter(c => c !== j.code) : [...cur, j.code]);
                   }}
                     className={`text-left px-3 py-2.5 rounded-lg border-2 transition-all text-sm font-medium ${
-                      sel ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-100 hover:border-gray-200 text-gray-700"
+                      sel ? "border-indigo-500 bg-indigo-50 text-indigo-700" : disabled ? "border-gray-50 bg-gray-50 text-gray-300 cursor-not-allowed" : "border-gray-100 hover:border-gray-200 text-gray-700"
                     }`}>
                     <span className="mr-1.5">{sel ? "☑" : "☐"}</span>{j.name}
                     {HIGH_SCRUTINY.includes(j.code) && <span className="text-xs text-red-400 ml-1">⚠</span>}
                   </button>
                 );
               })}
+              </div>
             </div>
-          )}
+            );
+          })()}
         </div>
 
         <div className="flex gap-3">
