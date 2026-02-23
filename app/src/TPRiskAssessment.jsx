@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 
 const JURISDICTIONS = [
   { code: "US", name: "United States", risk: 2 },
@@ -275,7 +275,7 @@ function GapItem({ icon, title, desc, severity }) {
   );
 }
 
-const API_URL = "https://xmrd6fdrpa.execute-api.us-east-1.amazonaws.com/send-report";
+const API_URL = "https://8unqfgs6w6.execute-api.us-east-1.amazonaws.com/send-report";
 
 export default function TPRiskAssessment() {
   const [screen, setScreen] = useState("intro");
@@ -283,7 +283,16 @@ export default function TPRiskAssessment() {
   const [answers, setAnswers] = useState({});
   const [email, setEmail] = useState("");
   const [sendStatus, setSendStatus] = useState("idle"); // idle | sending | sent | error
+  const [showModal, setShowModal] = useState(false);
   const topRef = useRef(null);
+
+  // Show the email modal when results screen appears
+  useEffect(() => {
+    if (screen === "results" && sendStatus !== "sent") {
+      const timer = setTimeout(() => setShowModal(true), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [screen]);
 
   const scrollUp = () => topRef.current?.scrollIntoView({ behavior: "smooth" });
 
@@ -452,6 +461,13 @@ export default function TPRiskAssessment() {
     </div>
   );
 
+  // EMAIL MODAL HANDLER
+  const handleModalSubmit = async () => {
+    if (!email || !email.includes("@")) return;
+    await sendReport();
+    setShowModal(false);
+  };
+
   // RESULTS SCREEN
   if (screen === "results") {
     const score = calcScore();
@@ -460,6 +476,73 @@ export default function TPRiskAssessment() {
     const a = answers;
     return (
       <div ref={topRef} className="min-h-screen bg-gray-50 p-4">
+        {/* ── Email Gate Modal ── */}
+        {showModal && sendStatus !== "sent" && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}>
+            <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 relative animate-[fadeScaleIn_0.35s_ease-out]">
+              {/* Close (X) button */}
+              <button onClick={() => setShowModal(false)} className="absolute top-4 right-4 text-gray-300 hover:text-gray-500 transition-colors" aria-label="Close">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+
+              {/* Icon */}
+              <div className="flex justify-center mb-5">
+                <div className="w-16 h-16 rounded-full bg-indigo-100 flex items-center justify-center">
+                  <span className="text-3xl">📊</span>
+                </div>
+              </div>
+
+              {/* Score teaser */}
+              <div className="text-center mb-6">
+                <h2 className="text-2xl font-black text-gray-900 mb-2">Your score: {score}/100</h2>
+                <p className="text-gray-500 text-sm leading-relaxed">
+                  We found <span className="font-semibold text-indigo-600">{gaps.length} gap{gaps.length !== 1 ? "s" : ""}</span> and built a
+                  <span className="font-semibold text-indigo-600"> {actions.length}-step action plan</span> for you.
+                </p>
+              </div>
+
+              {/* Divider */}
+              <div className="border-t border-gray-100 mb-6" />
+
+              {/* CTA copy */}
+              <p className="text-center text-gray-700 font-semibold text-sm mb-4">Enter your email to view the full report</p>
+
+              {/* Email input */}
+              <div className="mb-4">
+                <input
+                  type="email"
+                  placeholder="you@company.com"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleModalSubmit()}
+                  disabled={sendStatus === "sending"}
+                  autoFocus
+                  className="w-full border-2 border-gray-200 focus:border-indigo-500 rounded-xl px-4 py-3.5 text-base text-gray-800 placeholder-gray-400 focus:outline-none transition-colors"
+                />
+              </div>
+
+              {/* Submit button */}
+              <button
+                onClick={handleModalSubmit}
+                disabled={sendStatus === "sending" || !email.includes("@")}
+                className={`w-full font-bold py-3.5 rounded-xl transition-all text-base ${
+                  sendStatus === "sending"
+                    ? "bg-gray-400 text-white cursor-wait"
+                    : sendStatus === "error"
+                    ? "bg-red-600 hover:bg-red-700 text-white"
+                    : !email.includes("@")
+                    ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                    : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-200"
+                }`}
+              >
+                {sendStatus === "sending" ? "Sending…" : sendStatus === "error" ? "Retry — Send Report" : "View Full Report →"}
+              </button>
+
+              <p className="text-center text-gray-400 text-xs mt-4">We'll also email you a copy of the report.</p>
+            </div>
+          </div>
+        )}
+
         <div className="max-w-2xl mx-auto">
           <div className="text-center mb-6">
             <div className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-600 text-xs font-bold tracking-wider px-4 py-2 rounded-full mb-4">YOUR RESULTS</div>
@@ -621,6 +704,11 @@ export default function TPRiskAssessment() {
                 <span className="text-green-700 text-sm font-medium">Full report unlocked and sent to your inbox!</span>
               </div>
             </div>
+          )}
+          {sendStatus !== "sent" && !showModal && (
+            <button onClick={() => setShowModal(true)} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-xl transition-colors text-base mb-6 shadow-lg shadow-indigo-200">
+              🔓 View Full Report — Enter Email
+            </button>
           )}
           <div className="text-center">
             <button onClick={() => { setScreen("intro"); setStep(0); setAnswers({}); scrollUp(); }} className="text-gray-400 hover:text-gray-600 text-sm underline">Start over</button>
